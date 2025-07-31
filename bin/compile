@@ -50,6 +50,23 @@ cat > "$BUILDPACK_DIR/pre-build-hook.sh" << 'EOF'
 
 echo "==> PostgreSQL pre-build hook: Setting up repository configuration"
 
+# Debug: Check for existing PostgreSQL repository configurations
+echo "Checking for existing PostgreSQL repository configurations..."
+if [ -d /etc/apt/sources.list.d ]; then
+    echo "Contents of /etc/apt/sources.list.d:"
+    ls -la /etc/apt/sources.list.d/ || echo "Cannot list directory"
+    
+    if [ -f /etc/apt/sources.list.d/pgdg.list ]; then
+        echo "Existing pgdg.list content:"
+        cat /etc/apt/sources.list.d/pgdg.list || echo "Cannot read file"
+    fi
+fi
+
+if [ -f /etc/apt/sources.list ]; then
+    echo "Checking /etc/apt/sources.list for PostgreSQL entries:"
+    grep -i postgresql /etc/apt/sources.list || echo "No PostgreSQL entries found"
+fi
+
 # Try to copy GPG key to standard location if we have write access
 if [ -w /usr/share/postgresql-common/pgdg ]; then
     mkdir -p /usr/share/postgresql-common/pgdg
@@ -105,7 +122,111 @@ chmod +x "$BUILDPACK_DIR/profile.d/postgresql-repo.sh"
 echo "==> Executing pre-build hook to configure repository..."
 . "$BUILDPACK_DIR/pre-build-hook.sh"
 
+# Create an APT configuration file that the APT buildpack can read
+# This will be placed in a location that the APT buildpack checks
+APT_CONFIG_DIR="$BUILDPACK_DIR/apt-config"
+mkdir -p "$APT_CONFIG_DIR"
+
+# Create the APT sources list in our buildpack directory
+echo "Creating APT sources configuration for APT buildpack..."
+cat > "$APT_CONFIG_DIR/pgdg.list" << EOF
+deb [signed-by=$GPG_KEY_DIR/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg-archive main
+EOF
+
+echo "APT sources configuration created:"
+cat "$APT_CONFIG_DIR/pgdg.list"
+
+# Create a script that will be executed by the APT buildpack
+# This script will copy our configuration to the system location when the APT buildpack runs
+cat > "$BUILDPACK_DIR/apt-buildpack-hook.sh" << 'EOF'
+#!/bin/sh
+# Hook script for APT buildpack to configure PostgreSQL repository
+
+echo "==> PostgreSQL APT buildpack hook: Configuring repository"
+
+# Debug: Check for existing PostgreSQL repository configurations
+echo "Checking for existing PostgreSQL repository configurations..."
+if [ -d /etc/apt/sources.list.d ]; then
+    echo "Contents of /etc/apt/sources.list.d:"
+    ls -la /etc/apt/sources.list.d/ || echo "Cannot list directory"
+    
+    if [ -f /etc/apt/sources.list.d/pgdg.list ]; then
+        echo "Existing pgdg.list content:"
+        cat /etc/apt/sources.list.d/pgdg.list || echo "Cannot read file"
+    fi
+fi
+
+# Check if we have write access to system directories
+if [ -w /etc/apt/sources.list.d ]; then
+    echo "Copying PostgreSQL repository configuration to system location..."
+    
+    # Copy GPG key to standard location
+    if [ -w /usr/share/postgresql-common/pgdg ]; then
+        mkdir -p /usr/share/postgresql-common/pgdg
+        cp "$POSTGRESQL_GPG_KEY_PATH" /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+        GPG_KEY_PATH="/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"
+    else
+        GPG_KEY_PATH="$POSTGRESQL_GPG_KEY_PATH"
+    fi
+    
+    # Remove any existing problematic configurations
+    if [ -f /etc/apt/sources.list.d/pgdg.list ]; then
+        rm -f /etc/apt/sources.list.d/pgdg.list
+    fi
+    
+    # Add our configuration
+    cat > /etc/apt/sources.list.d/pgdg.list << INNER_EOF
+deb [signed-by=$GPG_KEY_PATH] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg-archive main
+INNER_EOF
+    
+    echo "PostgreSQL repository configured successfully in system location"
+    echo "Final repository configuration:"
+    cat /etc/apt/sources.list.d/pgdg.list
+else
+    echo "Warning: Cannot write to system APT directories"
+    echo "The APT buildpack may still use the old repository configuration"
+fi
+EOF
+
+chmod +x "$BUILDPACK_DIR/apt-buildpack-hook.sh"
+
+# Create a more aggressive cleanup script that runs before APT operations
+cat > "$BUILDPACK_DIR/cleanup-postgresql-repos.sh" << 'EOF'
+#!/bin/sh
+# Aggressive cleanup script for PostgreSQL repositories
+
+echo "==> Aggressive cleanup of PostgreSQL repositories"
+
+# Remove all PostgreSQL-related repository configurations
+if [ -d /etc/apt/sources.list.d ]; then
+    echo "Removing all PostgreSQL repository configurations..."
+    rm -f /etc/apt/sources.list.d/pgdg.list
+    rm -f /etc/apt/sources.list.d/postgresql.list
+    rm -f /etc/apt/sources.list.d/pgdg-*.list
+    
+    # List remaining files
+    echo "Remaining files in /etc/apt/sources.list.d:"
+    ls -la /etc/apt/sources.list.d/ || echo "Cannot list directory"
+fi
+
+# Check main sources.list for PostgreSQL entries
+if [ -f /etc/apt/sources.list ]; then
+    echo "Checking main sources.list for PostgreSQL entries..."
+    if grep -i postgresql /etc/apt/sources.list; then
+        echo "Warning: PostgreSQL entries found in main sources.list"
+        echo "These may need to be removed manually"
+    fi
+fi
+
+echo "==> PostgreSQL repository cleanup completed"
+EOF
+
+chmod +x "$BUILDPACK_DIR/cleanup-postgresql-repos.sh"
+
 echo "==> PostgreSQL focal archive APT source configured successfully"
 echo "==> Buildpack files available at: $BUILDPACK_DIR"
 echo "==> Pre-build hook: $BUILDPACK_DIR/pre-build-hook.sh"
 echo "==> Profile script: $BUILDPACK_DIR/profile.d/postgresql-repo.sh"
+echo "==> APT buildpack hook: $BUILDPACK_DIR/apt-buildpack-hook.sh"
+echo "==> APT config: $APT_CONFIG_DIR/pgdg.list"
+echo "==> Cleanup script: $BUILDPACK_DIR/cleanup-postgresql-repos.sh"
