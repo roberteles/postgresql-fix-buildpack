@@ -3,53 +3,95 @@ set -e
 
 echo "DEBUG: HEROKUISH_SETUIDGUID='$HEROKUISH_SETUIDGUID'"
 echo "DEBUG: Running as UID=$(id -u) user=$(id -un)"
-ls -ld /var/lib/apt/lists /var/lib/apt/lists/partial || true
 
-echo "==> Setting up PostgreSQL focal archive APT source (with permission sanity checks)"
+echo "==> Setting up PostgreSQL focal archive APT source (non-root approach)"
 
-# Helper to fail with explanation if we don't have privilege
-require_root() {
-  if [ "$(id -u)" != "0" ]; then
-    echo "ERROR: This buildpack needs to run as root to manipulate /var/lib/apt/lists and add APT sources."
-    echo "Current UID: $(id -u). If you’re on Dokku/herokuish, ensure the build environment executes buildpacks with root privileges."
-    exit 1
-  fi
-}
+# Use user-writable locations instead of system directories
+BUILDPACK_DIR="/tmp/postgresql-buildpack"
+GPG_KEY_DIR="$BUILDPACK_DIR/gpg"
+APT_SOURCES_DIR="$BUILDPACK_DIR/apt-sources"
 
-# 0. Ensure we are root (apt operations require elevated privileges)
-require_root
+# Create our working directories
+mkdir -p "$GPG_KEY_DIR"
+mkdir -p "$APT_SOURCES_DIR"
 
-# 1. Ensure the apt lists directory and partial subdir exist with correct ownership
-mkdir -p /var/lib/apt/lists/partial
-chown -R root:root /var/lib/apt/lists
-chmod 755 /var/lib/apt/lists
-chmod 755 /var/lib/apt/lists/partial
+echo "Using buildpack directories:"
+echo "  GPG Key: $GPG_KEY_DIR"
+echo "  APT Sources: $APT_SOURCES_DIR"
 
-# 2. Remove legacy/broken PGDG list if it points at main endpoint
-if [ -f /etc/apt/sources.list.d/pgdg.list ]; then
-  if grep -q 'apt.postgresql.org' /etc/apt/sources.list.d/pgdg.list; then
-    rm -f /etc/apt/sources.list.d/pgdg.list
-  fi
+# Download PostgreSQL GPG key to our buildpack directory
+echo "Downloading PostgreSQL GPG key..."
+if ! curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+  -o "$GPG_KEY_DIR/apt.postgresql.org.asc"; then
+    echo "Warning: Failed to download GPG key via curl, trying wget..."
+    if command -v wget >/dev/null 2>&1; then
+        wget -qO "$GPG_KEY_DIR/apt.postgresql.org.asc" \
+          https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    else
+        echo "Error: Neither curl nor wget available"
+        exit 1
+    fi
 fi
 
-# 3. Install minimal prerequisites quietly (curl, ca-certificates)
-# Use quiet flags to reduce noise but still fail loudly on errors
-apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
+# Verify the GPG key was downloaded
+if [ ! -f "$GPG_KEY_DIR/apt.postgresql.org.asc" ] || [ ! -s "$GPG_KEY_DIR/apt.postgresql.org.asc" ]; then
+    echo "Error: GPG key file is missing or empty"
+    exit 1
+fi
 
-# 4. Import PostgreSQL signing key
-mkdir -p /usr/share/postgresql-common/pgdg
-curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-  -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+echo "GPG key downloaded successfully: $(ls -la "$GPG_KEY_DIR/apt.postgresql.org.asc")"
 
-# 5. Point to the archive mirror for focal
-cat <<EOF > /etc/apt/sources.list.d/pgdg.list
-deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg-archive main
+# Create the APT sources list in our buildpack directory
+echo "Creating APT sources configuration..."
+cat > "$APT_SOURCES_DIR/pgdg.list" << EOF
+deb [signed-by=$GPG_KEY_DIR/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg-archive main
 EOF
 
-# 6. Clean stale metadata and refresh
-rm -rf /var/lib/apt/lists/*
-mkdir -p /var/lib/apt/lists/partial
-apt-get update -qq
+echo "APT sources configuration created:"
+cat "$APT_SOURCES_DIR/pgdg.list"
+
+# Set environment variables that can be used by subsequent buildpacks
+# These will be available in the build environment
+export POSTGRESQL_GPG_KEY_PATH="$GPG_KEY_DIR/apt.postgresql.org.asc"
+export POSTGRESQL_APT_SOURCES_PATH="$APT_SOURCES_DIR/pgdg.list"
+export POSTGRESQL_ARCHIVE_ENABLED="true"
+
+# Create a script that can be sourced by other buildpacks to set up the repository
+cat > "$BUILDPACK_DIR/setup-postgresql-repo.sh" << 'EOF'
+#!/bin/sh
+# Script to set up PostgreSQL repository in subsequent buildpacks
+
+if [ -n "$POSTGRESQL_GPG_KEY_PATH" ] && [ -f "$POSTGRESQL_GPG_KEY_PATH" ]; then
+    echo "Setting up PostgreSQL repository from buildpack..."
+    
+    # Copy GPG key to system location if we have write access
+    if [ -w /usr/share/postgresql-common/pgdg ]; then
+        mkdir -p /usr/share/postgresql-common/pgdg
+        cp "$POSTGRESQL_GPG_KEY_PATH" /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+        GPG_KEY_PATH="/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"
+    else
+        # Use the buildpack location
+        GPG_KEY_PATH="$POSTGRESQL_GPG_KEY_PATH"
+    fi
+    
+    # Add the repository source
+    if [ -w /etc/apt/sources.list.d ]; then
+        cat > /etc/apt/sources.list.d/pgdg.list << INNER_EOF
+deb [signed-by=$GPG_KEY_PATH] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg-archive main
+INNER_EOF
+        echo "PostgreSQL repository added to system APT sources"
+    else
+        echo "Warning: Cannot write to /etc/apt/sources.list.d, repository not added to system"
+        echo "You may need to manually add the repository in your application"
+    fi
+else
+    echo "Warning: PostgreSQL GPG key not found, repository not configured"
+fi
+EOF
+
+
+chmod +x "$BUILDPACK_DIR/setup-postgresql-repo.sh"
 
 echo "==> PostgreSQL focal archive APT source configured successfully"
+echo "==> Buildpack files available at: $BUILDPACK_DIR"
+echo "==> To use in subsequent buildpacks, source: $BUILDPACK_DIR/setup-postgresql-repo.sh"
