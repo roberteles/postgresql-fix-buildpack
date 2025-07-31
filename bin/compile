@@ -121,8 +121,62 @@ echo "Setting up environment for subsequent buildpacks..."
 export APT_CONFIG="$BUILDPACK_DIR/apt.conf"
 export APT_SOURCES_LIST="$BUILDPACK_DIR/sources.list.clean"
 
+# Create a script that will be executed by the APT buildpack to override the configuration
+cat > "$BUILDPACK_DIR/apt-buildpack-override.sh" << 'EOF'
+#!/bin/sh
+# Script to override APT buildpack configuration
+
+echo "==> Overriding APT buildpack configuration"
+
+# Create a temporary sources.list that excludes the problematic repository
+if [ -f /etc/apt/sources.list ]; then
+    echo "Creating temporary sources.list without problematic PostgreSQL repository..."
+    
+    # Create a clean sources.list without the problematic entry
+    grep -v "apt.postgresql.org" /etc/apt/sources.list > /tmp/sources.list.clean
+    
+    # Add our correct repository
+    echo "deb [signed-by=$POSTGRESQL_GPG_KEY_PATH] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg-archive main" >> /tmp/sources.list.clean
+    
+    # Replace the original sources.list with our clean version
+    if [ -w /etc/apt/sources.list ]; then
+        cp /tmp/sources.list.clean /etc/apt/sources.list
+        echo "Replaced /etc/apt/sources.list with clean version"
+    else
+        echo "Warning: Cannot replace /etc/apt/sources.list"
+        echo "Using temporary sources.list: /tmp/sources.list.clean"
+        export APT_SOURCES_LIST="/tmp/sources.list.clean"
+    fi
+else
+    echo "Warning: Cannot find /etc/apt/sources.list"
+fi
+EOF
+
+chmod +x "$BUILDPACK_DIR/apt-buildpack-override.sh"
+
+# Create a profile script that will be sourced by the build environment
+mkdir -p "$BUILDPACK_DIR/profile.d"
+cat > "$BUILDPACK_DIR/profile.d/postgresql-repo.sh" << 'EOF'
+#!/bin/sh
+# Profile script to set up PostgreSQL repository environment
+
+export POSTGRESQL_GPG_KEY_PATH="$POSTGRESQL_GPG_KEY_PATH"
+export POSTGRESQL_ARCHIVE_ENABLED="true"
+export APT_CONFIG="$BUILDPACK_DIR/apt.conf"
+export APT_SOURCES_LIST="$BUILDPACK_DIR/sources.list.clean"
+
+# Execute the override script
+if [ -f "$BUILDPACK_DIR/apt-buildpack-override.sh" ]; then
+    . "$BUILDPACK_DIR/apt-buildpack-override.sh"
+fi
+EOF
+
+chmod +x "$BUILDPACK_DIR/profile.d/postgresql-repo.sh"
+
 echo "==> PostgreSQL focal archive APT source configured successfully"
 echo "==> Buildpack files available at: $BUILDPACK_DIR"
 echo "==> Fix script: $BUILDPACK_DIR/fix-postgresql-repo.sh"
 echo "==> APT config: $BUILDPACK_DIR/apt.conf"
 echo "==> Clean sources.list: $BUILDPACK_DIR/sources.list.clean"
+echo "==> APT buildpack override: $BUILDPACK_DIR/apt-buildpack-override.sh"
+echo "==> Profile script: $BUILDPACK_DIR/profile.d/postgresql-repo.sh"
