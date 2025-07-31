@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+# Buildpack to fix PostgreSQL repository issue for Ubuntu Focal
+# This runs before the apt buildpack to fix the repository configuration
+
+set -e
+
+echo "Fixing PostgreSQL repository configuration for Ubuntu Focal..."
+
+# Create the directory for PostgreSQL GPG keys
+mkdir -p /usr/share/postgresql-common/pgdg
+
+# Import the PostgreSQL GPG key
+echo "Importing PostgreSQL GPG key..."
+curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+  -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+
+# Configure the archive repository for focal
+echo "Configuring PostgreSQL archive repository..."
+cat > /etc/apt/sources.list.d/pgdg.list << EOF
+deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg main
+EOF
+
+# Clear any stale package lists
+echo "Clearing stale package lists..."
+rm -rf /var/lib/apt/lists/* || true
+
+echo "PostgreSQL repository configuration fixed successfully!" 

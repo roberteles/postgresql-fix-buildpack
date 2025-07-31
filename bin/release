@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+# Release script for PostgreSQL repository fix buildpack
+# This buildpack doesn't add any processes
+
+echo "--- {}" 
