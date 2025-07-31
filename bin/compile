@@ -81,8 +81,26 @@ fi
 
 # Remove any existing problematic PostgreSQL repository configurations
 if [ -f /etc/apt/sources.list.d/pgdg.list ]; then
-    echo "Removing existing PostgreSQL repository configuration..."
+    echo "Removing existing PostgreSQL repository configuration from sources.list.d..."
     rm -f /etc/apt/sources.list.d/pgdg.list
+fi
+
+# Check and fix the main sources.list file
+if [ -f /etc/apt/sources.list ] && [ -w /etc/apt/sources.list ]; then
+    echo "Checking and fixing main sources.list file..."
+    
+    # Create a backup
+    cp /etc/apt/sources.list /etc/apt/sources.list.backup
+    
+    # Remove PostgreSQL entries from main sources.list
+    if grep -q "apt.postgresql.org" /etc/apt/sources.list; then
+        echo "Removing PostgreSQL entries from main sources.list..."
+        grep -v "apt.postgresql.org" /etc/apt/sources.list > /etc/apt/sources.list.tmp
+        mv /etc/apt/sources.list.tmp /etc/apt/sources.list
+        echo "PostgreSQL entries removed from main sources.list"
+    fi
+else
+    echo "Warning: Cannot modify main sources.list file"
 fi
 
 # Add the correct PostgreSQL repository configuration
@@ -209,13 +227,19 @@ if [ -d /etc/apt/sources.list.d ]; then
     ls -la /etc/apt/sources.list.d/ || echo "Cannot list directory"
 fi
 
-# Check main sources.list for PostgreSQL entries
-if [ -f /etc/apt/sources.list ]; then
+# Check and fix main sources.list for PostgreSQL entries
+if [ -f /etc/apt/sources.list ] && [ -w /etc/apt/sources.list ]; then
     echo "Checking main sources.list for PostgreSQL entries..."
     if grep -i postgresql /etc/apt/sources.list; then
-        echo "Warning: PostgreSQL entries found in main sources.list"
-        echo "These may need to be removed manually"
+        echo "Removing PostgreSQL entries from main sources.list..."
+        grep -v -i postgresql /etc/apt/sources.list > /etc/apt/sources.list.clean
+        mv /etc/apt/sources.list.clean /etc/apt/sources.list
+        echo "PostgreSQL entries removed from main sources.list"
+    else
+        echo "No PostgreSQL entries found in main sources.list"
     fi
+else
+    echo "Warning: Cannot modify main sources.list"
 fi
 
 echo "==> PostgreSQL repository cleanup completed"
