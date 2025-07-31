@@ -42,12 +42,45 @@ echo "GPG key downloaded successfully: $(ls -la "$GPG_KEY_DIR/apt.postgresql.org
 export POSTGRESQL_GPG_KEY_PATH="$GPG_KEY_DIR/apt.postgresql.org.asc"
 export POSTGRESQL_ARCHIVE_ENABLED="true"
 
-# Create a simple script that will be executed by the APT buildpack
+# Create a custom APT configuration that will override the problematic repository
+echo "Creating custom APT configuration..."
+cat > "$BUILDPACK_DIR/apt.conf" << 'EOF'
+# Custom APT configuration to handle PostgreSQL repository override
+Acquire::Check-Valid-Until "false";
+Acquire::Check-Date "false";
+
+# Disable the problematic PostgreSQL repository
+APT::Get::AllowUnauthenticated "false";
+APT::Get::AllowDowngrade "false";
+
+# Set custom sources list that excludes the problematic repository
+Dir::Etc::sourcelist "/tmp/postgresql-buildpack/sources.list.clean";
+EOF
+
+# Create a clean sources.list that excludes the problematic repository
+echo "Creating clean sources.list..."
+if [ -f /etc/apt/sources.list ]; then
+    # Create a clean sources.list without the problematic entry
+    grep -v "apt.postgresql.org" /etc/apt/sources.list > "$BUILDPACK_DIR/sources.list.clean"
+    
+    # Add our correct repository
+    echo "deb [signed-by=$GPG_KEY_DIR/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg-archive main" >> "$BUILDPACK_DIR/sources.list.clean"
+    
+    echo "Clean sources.list created:"
+    cat "$BUILDPACK_DIR/sources.list.clean"
+else
+    echo "Warning: Cannot find /etc/apt/sources.list"
+fi
+
+# Create a script that will be executed by the APT buildpack
 cat > "$BUILDPACK_DIR/fix-postgresql-repo.sh" << 'EOF'
 #!/bin/sh
-# Simple script to fix PostgreSQL repository issue
+# Script to fix PostgreSQL repository issue
 
 echo "==> Fixing PostgreSQL repository configuration"
+
+# Set environment variables to use our custom APT configuration
+export APT_CONFIG="$BUILDPACK_DIR/apt.conf"
 
 # Check if we can write to system directories
 if [ -w /etc/apt/sources.list.d ]; then
@@ -73,6 +106,7 @@ INNER_EOF
     echo "PostgreSQL repository configured successfully"
 else
     echo "Warning: Cannot write to system APT directories"
+    echo "Using custom APT configuration to override problematic repository"
 fi
 EOF
 
@@ -82,6 +116,13 @@ chmod +x "$BUILDPACK_DIR/fix-postgresql-repo.sh"
 echo "==> Executing PostgreSQL repository fix..."
 . "$BUILDPACK_DIR/fix-postgresql-repo.sh"
 
+# Create environment variables that will be available to subsequent buildpacks
+echo "Setting up environment for subsequent buildpacks..."
+export APT_CONFIG="$BUILDPACK_DIR/apt.conf"
+export APT_SOURCES_LIST="$BUILDPACK_DIR/sources.list.clean"
+
 echo "==> PostgreSQL focal archive APT source configured successfully"
 echo "==> Buildpack files available at: $BUILDPACK_DIR"
 echo "==> Fix script: $BUILDPACK_DIR/fix-postgresql-repo.sh"
+echo "==> APT config: $BUILDPACK_DIR/apt.conf"
+echo "==> Clean sources.list: $BUILDPACK_DIR/sources.list.clean"
