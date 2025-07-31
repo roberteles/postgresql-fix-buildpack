@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+echo "DEBUG: HEROKUISH_SETUIDGUID='$HEROKUISH_SETUIDGUID'"
+echo "DEBUG: Running as UID=$(id -u) user=$(id -un)"
+ls -ld /var/lib/apt/lists /var/lib/apt/lists/partial || true
+
 echo "==> Setting up PostgreSQL focal archive APT source (with permission sanity checks)"
 
 # Helper to fail with explanation if we don't have privilege
