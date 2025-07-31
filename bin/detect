@@ -1,6 +1,3 @@
-#!/usr/bin/env bash
-
-# Detect script for PostgreSQL repository fix buildpack
-# This buildpack should always be detected
-
-echo "postgresql-fix" 
+#!/bin/sh
+# always opts in
+exit 0

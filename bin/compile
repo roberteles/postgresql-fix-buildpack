@@ -1,28 +1,26 @@
-#!/usr/bin/env bash
-
-# Buildpack to fix PostgreSQL repository issue for Ubuntu Focal
-# This runs before the apt buildpack to fix the repository configuration
-
+#!/bin/sh
 set -e
+echo "==> Setting up PostgreSQL focal archive APT source"
 
-echo "Fixing PostgreSQL repository configuration for Ubuntu Focal..."
+# 1. Remove old PGDG list if present
+if [ -f /etc/apt/sources.list.d/pgdg.list ]; then
+  grep -q 'apt.postgresql.org' /etc/apt/sources.list.d/pgdg.list && rm -f /etc/apt/sources.list.d/pgdg.list
+fi
 
-# Create the directory for PostgreSQL GPG keys
+# 2. Install minimal prerequisites quietly
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
+
+# 3. Import PGDG signing key
 mkdir -p /usr/share/postgresql-common/pgdg
-
-# Import the PostgreSQL GPG key
-echo "Importing PostgreSQL GPG key..."
 curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
   -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
 
-# Configure the archive repository for focal
-echo "Configuring PostgreSQL archive repository..."
-cat > /etc/apt/sources.list.d/pgdg.list << EOF
-deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg main
+# 4. Point to the archived focal repository
+cat <<EOF > /etc/apt/sources.list.d/pgdg.list
+deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg-archive main
 EOF
 
-# Clear any stale package lists
-echo "Clearing stale package lists..."
-rm -rf /var/lib/apt/lists/* || true
-
-echo "PostgreSQL repository configuration fixed successfully!" 
+# 5. Refresh APT metadata
+rm -rf /var/lib/apt/lists/*
+apt-get update -qq
