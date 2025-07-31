@@ -9,15 +9,12 @@ echo "==> Setting up PostgreSQL focal archive APT source (non-root approach)"
 # Use user-writable locations instead of system directories
 BUILDPACK_DIR="/tmp/postgresql-buildpack"
 GPG_KEY_DIR="$BUILDPACK_DIR/gpg"
-APT_SOURCES_DIR="$BUILDPACK_DIR/apt-sources"
 
 # Create our working directories
 mkdir -p "$GPG_KEY_DIR"
-mkdir -p "$APT_SOURCES_DIR"
 
 echo "Using buildpack directories:"
 echo "  GPG Key: $GPG_KEY_DIR"
-echo "  APT Sources: $APT_SOURCES_DIR"
 
 # Download PostgreSQL GPG key to our buildpack directory
 echo "Downloading PostgreSQL GPG key..."
@@ -41,57 +38,74 @@ fi
 
 echo "GPG key downloaded successfully: $(ls -la "$GPG_KEY_DIR/apt.postgresql.org.asc")"
 
-# Create the APT sources list in our buildpack directory
-echo "Creating APT sources configuration..."
-cat > "$APT_SOURCES_DIR/pgdg.list" << EOF
-deb [signed-by=$GPG_KEY_DIR/apt.postgresql.org.asc] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg-archive main
-EOF
-
-echo "APT sources configuration created:"
-cat "$APT_SOURCES_DIR/pgdg.list"
-
 # Set environment variables that can be used by subsequent buildpacks
-# These will be available in the build environment
 export POSTGRESQL_GPG_KEY_PATH="$GPG_KEY_DIR/apt.postgresql.org.asc"
-export POSTGRESQL_APT_SOURCES_PATH="$APT_SOURCES_DIR/pgdg.list"
 export POSTGRESQL_ARCHIVE_ENABLED="true"
 
-# Create a script that can be sourced by other buildpacks to set up the repository
-cat > "$BUILDPACK_DIR/setup-postgresql-repo.sh" << 'EOF'
+# Create a pre-build hook that will be executed before the APT buildpack
+# This creates the configuration in the standard location
+cat > "$BUILDPACK_DIR/pre-build-hook.sh" << 'EOF'
 #!/bin/sh
-# Script to set up PostgreSQL repository in subsequent buildpacks
+# Pre-build hook to configure PostgreSQL repository before APT buildpack runs
 
-if [ -n "$POSTGRESQL_GPG_KEY_PATH" ] && [ -f "$POSTGRESQL_GPG_KEY_PATH" ]; then
-    echo "Setting up PostgreSQL repository from buildpack..."
-    
-    # Copy GPG key to system location if we have write access
-    if [ -w /usr/share/postgresql-common/pgdg ]; then
-        mkdir -p /usr/share/postgresql-common/pgdg
-        cp "$POSTGRESQL_GPG_KEY_PATH" /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
-        GPG_KEY_PATH="/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"
-    else
-        # Use the buildpack location
-        GPG_KEY_PATH="$POSTGRESQL_GPG_KEY_PATH"
-    fi
-    
-    # Add the repository source
-    if [ -w /etc/apt/sources.list.d ]; then
-        cat > /etc/apt/sources.list.d/pgdg.list << INNER_EOF
+echo "==> PostgreSQL pre-build hook: Setting up repository configuration"
+
+# Try to copy GPG key to standard location if we have write access
+if [ -w /usr/share/postgresql-common/pgdg ]; then
+    mkdir -p /usr/share/postgresql-common/pgdg
+    cp "$POSTGRESQL_GPG_KEY_PATH" /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+    GPG_KEY_PATH="/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"
+    echo "GPG key copied to standard location: $GPG_KEY_PATH"
+else
+    # Use the buildpack location
+    GPG_KEY_PATH="$POSTGRESQL_GPG_KEY_PATH"
+    echo "Using buildpack GPG key location: $GPG_KEY_PATH"
+fi
+
+# Remove any existing problematic PostgreSQL repository configurations
+if [ -f /etc/apt/sources.list.d/pgdg.list ]; then
+    echo "Removing existing PostgreSQL repository configuration..."
+    rm -f /etc/apt/sources.list.d/pgdg.list
+fi
+
+# Add the correct PostgreSQL repository configuration
+if [ -w /etc/apt/sources.list.d ]; then
+    cat > /etc/apt/sources.list.d/pgdg.list << INNER_EOF
 deb [signed-by=$GPG_KEY_PATH] https://apt-archive.postgresql.org/pub/repos/apt focal-pgdg-archive main
 INNER_EOF
-        echo "PostgreSQL repository added to system APT sources"
-    else
-        echo "Warning: Cannot write to /etc/apt/sources.list.d, repository not added to system"
-        echo "You may need to manually add the repository in your application"
-    fi
+    echo "PostgreSQL archive repository configured successfully"
+    echo "Repository configuration:"
+    cat /etc/apt/sources.list.d/pgdg.list
 else
-    echo "Warning: PostgreSQL GPG key not found, repository not configured"
+    echo "Error: Cannot write to /etc/apt/sources.list.d"
+    echo "Repository configuration will need to be added manually"
 fi
 EOF
 
+chmod +x "$BUILDPACK_DIR/pre-build-hook.sh"
 
-chmod +x "$BUILDPACK_DIR/setup-postgresql-repo.sh"
+# Create a profile script that will be sourced by the build environment
+mkdir -p "$BUILDPACK_DIR/profile.d"
+cat > "$BUILDPACK_DIR/profile.d/postgresql-repo.sh" << 'EOF'
+#!/bin/sh
+# Profile script to set up PostgreSQL repository environment
+
+export POSTGRESQL_GPG_KEY_PATH="$POSTGRESQL_GPG_KEY_PATH"
+export POSTGRESQL_ARCHIVE_ENABLED="true"
+
+# Execute the pre-build hook
+if [ -f "$BUILDPACK_DIR/pre-build-hook.sh" ]; then
+    . "$BUILDPACK_DIR/pre-build-hook.sh"
+fi
+EOF
+
+chmod +x "$BUILDPACK_DIR/profile.d/postgresql-repo.sh"
+
+# Execute the pre-build hook now to set up the configuration immediately
+echo "==> Executing pre-build hook to configure repository..."
+. "$BUILDPACK_DIR/pre-build-hook.sh"
 
 echo "==> PostgreSQL focal archive APT source configured successfully"
 echo "==> Buildpack files available at: $BUILDPACK_DIR"
-echo "==> To use in subsequent buildpacks, source: $BUILDPACK_DIR/setup-postgresql-repo.sh"
+echo "==> Pre-build hook: $BUILDPACK_DIR/pre-build-hook.sh"
+echo "==> Profile script: $BUILDPACK_DIR/profile.d/postgresql-repo.sh"
